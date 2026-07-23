@@ -12,6 +12,9 @@ function HeatmapService.new(containerName)
 		folderName   = containerName or "PerformanceHeatmapContainer",
 		BigModels    = {},
 		MediumModels = {},
+		-- cache MeshId -> triangles (or false if it can't be loaded). Persists across runs:
+		-- reloading permission-less meshes on every click is just wasted time.
+		_triCache    = {},
 		colors = {
 			Big    = Color3.fromRGB(255,   0,   0),
 			Medium = Color3.fromRGB(255, 255,   0),
@@ -21,7 +24,7 @@ function HeatmapService.new(containerName)
 	return self
 end
 
--- crea (se serve) e restituisce la cartella dove mettere gli highlight
+-- creates (if needed) and returns the folder that holds the highlights
 function HeatmapService:ensureFolder()
 	local f = workspace:FindFirstChild(self.folderName)
 	if not f then
@@ -39,17 +42,17 @@ function HeatmapService:clear()
 	self.BigModels, self.MediumModels = {}, {}
 end
 
--- ordina le due tabelle in base al valore numerico estratto da Amount
+-- sorts both tables by the numeric value extracted from Amount
 function HeatmapService:sortModels()
 	local function extract(str)
-		-- rimuove i separatori delle migliaia ("12,345 tris" -> 12345) prima di leggere il numero
+		-- strip thousands separators ("12,345 tris" -> 12345) before reading the number
 		return tonumber(string.match((str:gsub(",", "")), "([%d%.]+)")) or 0
 	end
 	table.sort(self.BigModels, function(a,b) return extract(a.Amount) > extract(b.Amount) end)
 	table.sort(self.MediumModels, function(a,b) return extract(a.Amount) > extract(b.Amount) end)
 end
 
--- costruisce un UDim2 scalato, se mai ti servisse altrove
+-- builds a scaled UDim2, in case it's ever needed elsewhere
 function HeatmapService.scaleUDim2(size, factor)
 	return UDim2.new(
 		size.X.Scale  * factor, size.X.Offset  * factor,
@@ -57,14 +60,14 @@ function HeatmapService.scaleUDim2(size, factor)
 	)
 end
 
--- formatta un intero con i separatori delle migliaia (12345 -> "12,345")
+-- formats an integer with thousands separators (12345 -> "12,345")
 function HeatmapService.commaNumber(n)
 	local s = tostring(math.floor(n + 0.5))
 	local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
 	return (out:gsub("^,", ""))
 end
 
--- Crea i pezzi evidenziati per un Model intero
+-- Creates the highlight parts for a whole Model
 function HeatmapService:createHighlight(model, color)
 	local folder = self:ensureFolder()
 	for _,desc in ipairs(model:GetDescendants()) do
@@ -82,7 +85,7 @@ function HeatmapService:createHighlight(model, color)
 	end
 end
 
--- Evidenzia direttamente una BasePart (es. la MeshPart stessa)
+-- Highlights a BasePart directly (e.g. the MeshPart itself)
 function HeatmapService:createHighlightPart(part, color)
 	local h = Instance.new("Part")
 	h.Size         = part.Size + Vector3.new(1,1,1)
@@ -95,7 +98,7 @@ function HeatmapService:createHighlightPart(part, color)
 	h.Parent       = self:ensureFolder()
 end
 
--- Crea l’highlight per oggetti tipo luci o emitter
+-- Creates the highlight for objects such as lights or emitters
 function HeatmapService:createHighlightInstance(obj, color)
 	local p = obj.Parent
 	if p and p:IsA("BasePart") then
@@ -111,7 +114,7 @@ function HeatmapService:createHighlightInstance(obj, color)
 	end
 end
 
--- Metodi di analisi
+-- Analysis methods
 function HeatmapService:density()
 	for _,model in ipairs(workspace:GetDescendants()) do
 		if model:IsA("Model") then
@@ -214,9 +217,9 @@ function HeatmapService:particles()
 	end
 end
 
--- Conta i triangoli reali di una MeshPart tramite EditableMesh.
--- Ritorna un numero, oppure nil se la mesh non è misurabile (permessi/formato).
--- I risultati sono cache-ati per MeshId così ogni mesh unica si carica una volta sola.
+-- Counts the real triangles of a MeshPart via EditableMesh.
+-- Returns a number, or nil if the mesh can't be measured (permissions/format).
+-- Results are cached per MeshId so each unique mesh loads only once.
 function HeatmapService:meshTriangleCount(meshPart)
 	self._triCache = self._triCache or {}
 
@@ -233,16 +236,16 @@ function HeatmapService:meshTriangleCount(meshPart)
 		if id ~= nil and id ~= "" then
 			content = Content.fromUri(id)
 		else
-			content = meshPart.MeshContent -- MeshPart più recenti senza MeshId
+			content = meshPart.MeshContent -- newer MeshParts without a MeshId
 		end
 		return AssetService:CreateEditableMeshAsync(content)
 	end)
 
 	if ok and em then
 		count = #em:GetFaces()
-		em:Destroy() -- libera subito: gli EditableMesh pesano in memoria
+		em:Destroy() -- free immediately: EditableMeshes are memory-heavy
 	else
-		count = false -- non caricabile (permessi/formato)
+		count = false -- not loadable (permissions/format)
 	end
 
 	if cacheKey then
@@ -251,44 +254,78 @@ function HeatmapService:meshTriangleCount(meshPart)
 	return (count ~= false) and count or nil
 end
 
--- Heatmap per triangle-count reale, per singola MeshPart.
+-- Cost proxy for MeshParts that CAN'T be measured: uses only always-readable
+-- properties (fidelity + size). It is NOT a triangle count, and is labelled
+-- "est." accordingly -- we never pass a heuristic off as real data.
+function HeatmapService:meshCostEstimate(part)
+	local score   = part.Size.Magnitude / 10
+	local reasons = {}
+
+	if part.RenderFidelity == Enum.RenderFidelity.Precise then
+		score = score + 6
+		table.insert(reasons, "Render=Precise")
+	elseif part.RenderFidelity == Enum.RenderFidelity.Automatic then
+		score = score + 2
+	end
+
+	if part.CanCollide then
+		if part.CollisionFidelity == Enum.CollisionFidelity.PreciseConvexDecomposition then
+			score = score + 6
+			table.insert(reasons, "Collision=Precise")
+		elseif part.CollisionFidelity == Enum.CollisionFidelity.Default then
+			score = score + 3
+			table.insert(reasons, "Collision=Default")
+		end
+	end
+
+	return score, reasons
+end
+
+-- MeshPart cost heatmap.
+-- Where permissions allow it uses the REAL triangle count (EditableMesh);
+-- otherwise it falls back to the estimate, so the list isn't empty on scenes
+-- built from third-party assets (which is the common case).
 function HeatmapService:triangles()
-	self._triCache = {}
-	local unknown = 0
+	local measured, estimated = 0, 0
 
 	for _,obj in ipairs(workspace:GetDescendants()) do
 		if obj:IsA("MeshPart") then
 			local tris = self:meshTriangleCount(obj)
-			if tris == nil then
-				unknown = unknown + 1
-			else
-				local amtStr = string.format("(%s tris)", HeatmapService.commaNumber(tris))
-				local entry  = { Model = obj, Amount = amtStr }
-				local col    = self.colors.Ok
+			local amtStr, bucket
 
-				if tris < 2000 then
-					col = self.colors.Ok
-				elseif tris < 10000 then
-					col = self.colors.Medium
-					table.insert(self.MediumModels, entry)
-				else
-					col = self.colors.Big
-					table.insert(self.BigModels, entry)
-				end
-				self:createHighlightPart(obj, col)
+			if tris ~= nil then
+				measured = measured + 1
+				amtStr = string.format("(%s tris)", HeatmapService.commaNumber(tris))
+				bucket = (tris < 2000 and "Ok") or (tris < 10000 and "Medium") or "Big"
+			else
+				estimated = estimated + 1
+				local score, reasons = self:meshCostEstimate(obj)
+				local why = (#reasons > 0) and (" · " .. table.concat(reasons, ", ")) or ""
+				amtStr = string.format("(est. %.1f%s)", score, why)
+				bucket = (score < 5 and "Ok") or (score < 12 and "Medium") or "Big"
 			end
+
+			local entry = { Model = obj, Amount = amtStr }
+			if bucket == "Big" then
+				table.insert(self.BigModels, entry)
+			elseif bucket == "Medium" then
+				table.insert(self.MediumModels, entry)
+			end
+			self:createHighlightPart(obj, self.colors[bucket])
 		end
 	end
 
-	if unknown > 0 then
+	if estimated > 0 then
 		warn(string.format(
-			"[Performance Heatmap] %d MeshPart non misurabili (mesh non editabile / permessi mancanti); escluse dai risultati.",
-			unknown
+			"[Performance Heatmap] Triangles: %d MeshPart(s) measured, %d estimated. " ..
+			"Meshes without read permission don't expose real triangles: " ..
+			"the estimate uses RenderFidelity/CollisionFidelity/size.",
+			measured, estimated
 		))
 	end
 end
 
--- In base all’opzione chiama la routine giusta
+-- Dispatches to the right routine based on the option
 function HeatmapService:run(option, mainUI)
 	self:clear()
 	if option == "Density"  then self:density()

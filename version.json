@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.4.1",
   "url": "https://create.roblox.com/store/asset/89564204038561",
   "notes": "Versioned release: added semantic versioning, in-plugin update check, and the Triangles heatmap mode (real per-MeshPart triangle counts via EditableMesh)."
 }

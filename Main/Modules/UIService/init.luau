@@ -20,7 +20,7 @@ function UIService.new(mouse, animModule, main, template, Statstemp)
 	}, UIService)
 
 
-	-- collego i Frame-button nel menu alle callback
+	-- bind the menu Frame-buttons to their callbacks
 	for _,btn in ipairs(main.Body.Head:GetChildren()) do
 		if btn:IsA("Frame") then
 			animModule.button(btn, mouse)
@@ -45,7 +45,7 @@ end
 
 -- Modules/UIService.lua
 function UIService:refreshList(bigList, medList, instanceClass, colors)
-	-- svuota la lista
+	-- clear the list
 	for _,child in ipairs(self.mainUI.Body.List:GetChildren()) do
 		if child.Name == "Template" then child:Destroy() end
 	end
@@ -66,7 +66,7 @@ function UIService:refreshList(bigList, medList, instanceClass, colors)
 		end)
 	end
 
-	-- usa colors che arriva da HeatmapService
+	-- use the colors passed in from HeatmapService
 	for _,r in ipairs(bigList) do mkRow(r, colors.Big,    1) end
 	for _,r in ipairs(medList) do mkRow(r, colors.Medium, 2) end
 end
@@ -74,42 +74,42 @@ end
 function UIService:createStats(mainUI, template)
 	local statsFrame = mainUI.Body.Stats
 
-	-- 1) Pulisci contenitore (stat e divider)
+	-- 1) Clear the container (stat and divider rows)
 	for _, child in ipairs(statsFrame:GetChildren()) do
 		if child.Name == "Stat" or child.Name == "Divider" then
 			child:Destroy()
 		end
 	end
 
-	-- 3) Costante per arrotondare a 4 decimali
+	-- 3) Helper to round to 4 decimals
 	local function setValueLabel(row, val)
 		local mult = 10 ^ 4
 		row.Amount.Text = tostring(math.floor(val * mult + 0.5) / mult)
 	end
 
-	-- 4) Cicla FetchProp
+	-- 4) Iterate over FetchProp
 	for i, data in ipairs(FetchProp) do
 		if data.Divider then
-			-- crea un semplice TextLabel come divider
+			-- create a simple TextLabel as a divider
 			local hdr = script.Divider:Clone()
 			hdr.Title.Text               = data.Title
 			hdr.LayoutOrder        = i
 			hdr.Parent             = statsFrame
 		else
-			-- crea la riga Stat
+			-- create the Stat row
 			local row = template:Clone()
 			row.Name               = "Stat"
 			row.Parent             = statsFrame
 			row.LayoutOrder        = i
 
-			-- imposta titoli e descrizione
+			-- set titles and description
 			row.Container.Title.Text = data.Name
 			row.Container.Desc.Text  = data.Description
 
-			-- valore iniziale
+			-- initial value
 			setValueLabel(row, STATS[data.Name])
 
-			-- collega il segnale, disconnetti eventuali vecchie connessioni
+			-- bind the signal, disconnecting any previous connection
 			if connections[data.Name] then
 				connections[data.Name]:Disconnect()
 			end

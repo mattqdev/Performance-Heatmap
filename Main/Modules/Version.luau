@@ -1,14 +1,14 @@
 --!strict
 -- Version.luau
--- Unica fonte di verità per la versione del plugin (incorporata in ogni build).
--- Ad ogni release: aggiorna `Version.current` QUI e il campo "version" in
--- version.json alla radice del repo (servito da GitHub raw all'UpdateChecker).
+-- Single source of truth for the plugin's version (baked into every build).
+-- On each release: bump `Version.current` HERE and the "version" field in
+-- version.json at the repo root (served by GitHub raw to the UpdateChecker).
 
 local Version = {}
 
 Version.current = "1.0.0"
 
--- Trasforma una stringa semver ("1.2.3") in { major, minor, patch }.
+-- Turns a semver string ("1.2.3") into { major, minor, patch }.
 function Version.parse(str: string): { number }
 	local parts = {}
 	for n in string.gmatch(str or "", "%d+") do
@@ -17,7 +17,7 @@ function Version.parse(str: string): { number }
 	return { parts[1] or 0, parts[2] or 0, parts[3] or 0 }
 end
 
--- Confronta due versioni. Ritorna 1 se a > b, -1 se a < b, 0 se uguali.
+-- Compares two versions. Returns 1 if a > b, -1 if a < b, 0 if equal.
 function Version.compare(a: string, b: string): number
 	local pa, pb = Version.parse(a), Version.parse(b)
 	for i = 1, 3 do
@@ -30,7 +30,7 @@ function Version.compare(a: string, b: string): number
 	return 0
 end
 
--- true se `remote` è più recente di `localVersion`.
+-- true if `remote` is newer than `localVersion`.
 function Version.isNewer(remote: string, localVersion: string): boolean
 	return Version.compare(remote, localVersion) > 0
 end
