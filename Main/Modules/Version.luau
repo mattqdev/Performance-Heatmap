@@ -6,7 +6,7 @@
 
 local Version = {}
 
-Version.current = "1.0.0"
+Version.current = "1.4.1"
 
 -- Turns a semver string ("1.2.3") into { major, minor, patch }.
 function Version.parse(str: string): { number }
