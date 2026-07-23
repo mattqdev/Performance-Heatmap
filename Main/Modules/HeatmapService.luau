@@ -3,6 +3,7 @@ HeatmapService.__index = HeatmapService
 
 local workspace       = game:GetService("Workspace")
 local StudioService   = game:GetService("StudioService")
+local AssetService    = game:GetService("AssetService")
 
 local UIService = require(script.Parent.UIService)
 
@@ -41,7 +42,8 @@ end
 -- ordina le due tabelle in base al valore numerico estratto da Amount
 function HeatmapService:sortModels()
 	local function extract(str)
-		return tonumber(string.match(str, "([%d%.]+)")) or 0
+		-- rimuove i separatori delle migliaia ("12,345 tris" -> 12345) prima di leggere il numero
+		return tonumber(string.match((str:gsub(",", "")), "([%d%.]+)")) or 0
 	end
 	table.sort(self.BigModels, function(a,b) return extract(a.Amount) > extract(b.Amount) end)
 	table.sort(self.MediumModels, function(a,b) return extract(a.Amount) > extract(b.Amount) end)
@@ -53,6 +55,13 @@ function HeatmapService.scaleUDim2(size, factor)
 		size.X.Scale  * factor, size.X.Offset  * factor,
 		size.Y.Scale  * factor, size.Y.Offset  * factor
 	)
+end
+
+-- formatta un intero con i separatori delle migliaia (12345 -> "12,345")
+function HeatmapService.commaNumber(n)
+	local s = tostring(math.floor(n + 0.5))
+	local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+	return (out:gsub("^,", ""))
 end
 
 -- Crea i pezzi evidenziati per un Model intero
@@ -71,6 +80,19 @@ function HeatmapService:createHighlight(model, color)
 			h.Parent       = folder
 		end
 	end
+end
+
+-- Evidenzia direttamente una BasePart (es. la MeshPart stessa)
+function HeatmapService:createHighlightPart(part, color)
+	local h = Instance.new("Part")
+	h.Size         = part.Size + Vector3.new(1,1,1)
+	h.CFrame       = part.CFrame
+	h.Anchored     = true
+	h.CanCollide   = false
+	h.Transparency = .5
+	h.BrickColor   = BrickColor.new(color)
+	h.Archivable   = false
+	h.Parent       = self:ensureFolder()
 end
 
 -- Crea l’highlight per oggetti tipo luci o emitter
@@ -192,6 +214,80 @@ function HeatmapService:particles()
 	end
 end
 
+-- Conta i triangoli reali di una MeshPart tramite EditableMesh.
+-- Ritorna un numero, oppure nil se la mesh non è misurabile (permessi/formato).
+-- I risultati sono cache-ati per MeshId così ogni mesh unica si carica una volta sola.
+function HeatmapService:meshTriangleCount(meshPart)
+	self._triCache = self._triCache or {}
+
+	local id = meshPart.MeshId
+	local cacheKey = (id ~= nil and id ~= "") and id or nil
+	if cacheKey and self._triCache[cacheKey] ~= nil then
+		local c = self._triCache[cacheKey]
+		return (c ~= false) and c or nil
+	end
+
+	local count
+	local ok, em = pcall(function()
+		local content
+		if id ~= nil and id ~= "" then
+			content = Content.fromUri(id)
+		else
+			content = meshPart.MeshContent -- MeshPart più recenti senza MeshId
+		end
+		return AssetService:CreateEditableMeshAsync(content)
+	end)
+
+	if ok and em then
+		count = #em:GetFaces()
+		em:Destroy() -- libera subito: gli EditableMesh pesano in memoria
+	else
+		count = false -- non caricabile (permessi/formato)
+	end
+
+	if cacheKey then
+		self._triCache[cacheKey] = count
+	end
+	return (count ~= false) and count or nil
+end
+
+-- Heatmap per triangle-count reale, per singola MeshPart.
+function HeatmapService:triangles()
+	self._triCache = {}
+	local unknown = 0
+
+	for _,obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("MeshPart") then
+			local tris = self:meshTriangleCount(obj)
+			if tris == nil then
+				unknown = unknown + 1
+			else
+				local amtStr = string.format("(%s tris)", HeatmapService.commaNumber(tris))
+				local entry  = { Model = obj, Amount = amtStr }
+				local col    = self.colors.Ok
+
+				if tris < 2000 then
+					col = self.colors.Ok
+				elseif tris < 10000 then
+					col = self.colors.Medium
+					table.insert(self.MediumModels, entry)
+				else
+					col = self.colors.Big
+					table.insert(self.BigModels, entry)
+				end
+				self:createHighlightPart(obj, col)
+			end
+		end
+	end
+
+	if unknown > 0 then
+		warn(string.format(
+			"[Performance Heatmap] %d MeshPart non misurabili (mesh non editabile / permessi mancanti); escluse dai risultati.",
+			unknown
+		))
+	end
+end
+
 -- In base all’opzione chiama la routine giusta
 function HeatmapService:run(option, mainUI)
 	self:clear()
@@ -199,6 +295,7 @@ function HeatmapService:run(option, mainUI)
 	elseif option == "Count"    then self:count()
 	elseif option == "Lights"   then self:lights()
 	elseif option == "Particles"then self:particles()
+	elseif option == "Triangles"then self:triangles()
 	end
 	self:sortModels()
 end

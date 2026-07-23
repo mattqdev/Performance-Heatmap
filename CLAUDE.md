@@ -25,11 +25,12 @@ The GUI instances (`MainUI`, `Template`, `Stat`, `Divider`, `BG`, `Version`) are
 
 ## Architecture
 
-Entry point is `Main/init.local.luau` (the plugin `LocalScript`). It owns all Studio-plugin API calls and wires three modules together:
+Entry point is `Main/init.local.luau` (the plugin `LocalScript`). It owns all Studio-plugin API calls and wires the modules together:
 
 1. **`Modules/HeatmapService.luau`** — pure analysis + highlighting. `new(containerName)` creates an instance holding `BigModels` / `MediumModels` result tables and a `colors` map (Big=red, Medium=yellow, Ok=green). `run(option)` clears prior state then dispatches to one analyzer:
    - `density()` / `count()` iterate `Model`s and classify by part density or part count.
    - `lights()` / `particles()` iterate light and `ParticleEmitter` instances and classify by a computed score.
+   - `triangles()` iterates `MeshPart`s and classifies by **real triangle count** obtained through `meshTriangleCount()`, which loads each mesh with `AssetService:CreateEditableMeshAsync(Content.fromUri(meshId))` and returns `#editableMesh:GetFaces()`. It is `pcall`-guarded (meshes without edit permission return `nil` and are excluded, not guessed), caches per `MeshId`, and `:Destroy()`s each EditableMesh immediately (they are memory-heavy). Highlights the MeshPart itself via `createHighlightPart`.
    - Each analyzer buckets items into Ok / Medium / Big by threshold, records `{ Model = <instance>, Amount = <string> }` entries into `MediumModels`/`BigModels`, and draws semi-transparent oversized highlight `Part`s into a non-`Archivable` workspace folder (`ensureFolder`). `clear()` destroys that folder's children.
    - `sortModels()` sorts result tables descending by the number parsed out of the `Amount` string.
 
@@ -37,7 +38,11 @@ Entry point is `Main/init.local.luau` (the plugin `LocalScript`). It owns all St
 
 3. **`Modules/Anim.luau`** — reusable TweenService hover/click/button animations applied to UI frames.
 
-4. **`Modules/UIService/Properties.luau`** — declarative list of the `Stats` metrics to display, as `{ Name, Description }` rows interleaved with `{ Divider = true, Title }` section headers. This is the single place to add/remove tracked metrics.
+4. **`Modules/UIService/Properties.luau`** — declarative list of the `Stats` metrics to display, as `{ Name, Description }` rows interleaved with `{ Divider = true, Title }` section headers. This is the single place to add/remove tracked metrics. `SceneDrawcallCount` / `SceneTriangleCount` live here — this is where the forum's "draw calls" request is surfaced (globally, via the Stats panel).
+
+5. **`Modules/Version.luau`** — single source of truth for the plugin's own version (`Version.current`), plus semver `parse` / `compare` / `isNewer` helpers. **Bump `Version.current` here and `version.json` at the repo root on every release.** The version is now baked into code — the old `Version` `StringValue` instance is no longer read (delete it from the plugin in Studio).
+
+6. **`Modules/UpdateChecker.luau`** — `check()` fetches `version.json` from `raw.githubusercontent.com/mattqdev/Performance-Heatmap/main/version.json` via `HttpService:GetAsync` (plugins may make HTTP requests regardless of the game's HttpEnabled setting), `JSONDecode`s it, and compares against `Version.current`. Fully `pcall`-guarded and returns a non-fatal `Result` table; `init.local.luau` runs it in a `task.spawn`, `warn`s on an available update, and appends "Update available" to the widget title.
 
 ### Control flow
 
@@ -47,9 +52,17 @@ Entry point is `Main/init.local.luau` (the plugin `LocalScript`). It owns all St
 
 The plugin is public and its direction is driven by feedback at https://devforum.roblox.com/t/3416936. Recurring themes to keep in mind when adding features:
 
-- **Better performance metrics than part/mesh count.** The strongest, repeated critique (bura1414, bitsplicer, xor25th, ramdoys) is that raw part/mesh count does not predict lag — placement and density in a small space matter more. The `density()` mode already partially addresses this; further work should lean on **triangle count** and **draw calls** rather than part counts.
-- **Draw calls metric** (NotRapidV, xor25th): expose draw-call analysis (the engine surfaces this via Shift+F2). `SceneDrawcallCount` / `SceneTriangleCount` are already read into the Stats panel via `Properties.luau` — a heatmap mode built on these would directly answer this request.
-- **Honest framing.** The creator (MattQ) has acknowledged the tool is "not exactly the most precise." Keep classification claims accurate and avoid overstating that highlighted objects definitively cause lag.
+- **Better performance metrics than part/mesh count.** The strongest, repeated critique (bura1414, bitsplicer, xor25th, ramdoys) is that raw part/mesh count does not predict lag — placement and density in a small space matter more. Partially addressed by `density()` and now by the per-MeshPart `triangles()` mode. ✅ triangle count shipped.
+- **Draw calls metric** (NotRapidV, xor25th): the engine surfaces this via Shift+F2. `SceneDrawcallCount` / `SceneTriangleCount` are read into the Stats panel via `Properties.luau`, answering it at scene level. A per-object draw-call heatmap is not straightforward (draw calls depend on batching/materials/textures, not a single object property) — still open.
+- **Honest framing.** The creator (MattQ) has acknowledged the tool is "not exactly the most precise." Keep classification claims accurate and avoid overstating that highlighted objects definitively cause lag (e.g. `triangles()` excludes rather than guesses unmeasurable meshes).
+
+### Manual steps in Studio (not in this repo)
+
+Some changes here require a matching edit to the plugin's GUI/instances in Studio:
+
+- **Triangles mode button:** the header menu auto-wires every `Frame` under `mainUI.Body.Head` (its `Name` is passed straight to `heatmap:run`). To expose the new mode, add a `Frame` named exactly `Triangles` (with the `Click`/`TextLabel`/etc. children the other buttons have) to `Body.Head`. No code change needed — `init.local.luau` and `HeatmapService:run` already handle `"Triangles"` and map its row icon to `MeshPart`.
+- **Delete the old `Version` StringValue** from the plugin tree — the code no longer reads it.
+- **Release flow:** bump `Version.current` in `Version.luau`, bump `version` in `version.json`, commit/push to `main` (so GitHub raw serves the new number), then publish the plugin.
 
 ## Conventions
 
