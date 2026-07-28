@@ -8,6 +8,7 @@ A **Roblox Studio plugin** ("Performance Heatmap") written in Luau. It scans `Wo
 
 - **Published plugin:** https://create.roblox.com/store/asset/89564204038561
 - **DevForum thread (user feedback / feature requests):** https://devforum.roblox.com/t/3416936 — the roadmap is driven by requests here (see "User-requested roadmap" below).
+- **`ROADMAP.md`** — the source of truth for unbuilt work: what's next, why, in what order, and what has been ruled out. Read it before proposing a feature; update it when direction changes.
 
 ## Build / test / run
 
@@ -73,12 +74,11 @@ The plugin is public and its direction is driven by feedback at https://devforum
 - **Draw calls metric** (NotRapidV, xor25th): the engine surfaces this via Shift+F2. `SceneDrawcallCount` / `SceneTriangleCount` are read into the Stats panel via `Properties.luau`, answering it at scene level. A per-object draw-call heatmap is **still open** and is the next big item — see the plan below.
 - **Honest framing.** The creator (MattQ) has acknowledged the tool is "not exactly the most precise." Keep classification claims accurate and avoid overstating that highlighted objects definitively cause lag. Established practice: `Triangles` labels unmeasurable meshes `(est. …)`; `Texture` says it ranks asset counts, not megabytes; `Overlap` says its percentages are an upper bound for rotated parts; `PlayOnly` Stats rows say they're measuring Studio. **Never dress a heuristic up as a measurement.**
 
-### Planned next (agreed direction, not yet built)
+### Planned next
 
-- **"Measure Selection" — real per-object cost, no permissions needed.** Read `SceneDrawcallCount` / `SceneTriangleCount`, make one object stop rendering (`LocalTransparencyModifier = 1` + `CastShadow = false` — not serialised, doesn't dirty the place), wait a frame, re-read: the delta is that object's **real** draw calls and triangles. This sidesteps the `CreateEditableMeshAsync` permission wall entirely and answers the per-object draw-call request with engine numbers rather than a heuristic. ~2 frames per object, so it's a "measure the selection / the top N candidates" action, not a whole-place scan. **Verify in Studio that `LocalTransparencyModifier` actually drops the object from the render batch in edit mode before promising this**; fall back to `Transparency = 1` if not.
-- **Static draw-call report.** Group renderables by `(MeshId, TextureID, SurfaceAppearance, MaterialVariant, Transparency > 0, CastShadow)` — group count ≈ draw calls, and one-off assets are the actionable finding. Validate the estimate against the real `SceneDrawcallCount` and show the error rather than hiding it.
-- **One-click fixes** via `ChangeHistoryService:TryBeginRecording` / `FinishRecording`, always preview-then-apply, never silent: `CollisionFidelity → Box` on decorative meshes (the biggest safe win on most places), `CastShadow = false`, `RenderFidelity → Automatic`, `Anchored = true` on static parts.
-- **Performance score + snapshot diff**, so a scan before and after optimising shows what was actually gained.
+**`ROADMAP.md` at the repo root is the single source of truth for unbuilt work** — what's next, why, in what order, and what has been ruled out. Read it before proposing a feature, and update it when direction changes rather than restating plans here.
+
+The short version: `Measure Selection` (attribute real draw calls and triangles to one object by diffing `Stats` while it stops rendering — sidesteps the `CreateEditableMeshAsync` permission wall), then a static draw-call report, then one-click fixes via `ChangeHistoryService`.
 
 ### Manual steps in Studio (not in this repo)
 

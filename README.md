@@ -86,6 +86,10 @@ There is no build step. The `.luau` files are synced into the plugin's script tr
 
 To cut a release: bump `Version.current` in `Main/Modules/Version.luau`, bump `version` in `version.json`, push to `main`, then publish the plugin.
 
+## Roadmap
+
+What's planned, in what order, and what's deliberately out of scope: **[ROADMAP.md](ROADMAP.md)**. Next up is per-object draw call and triangle *measurement* — reading the engine's own counters rather than estimating — followed by one-click fixes for the findings.
+
 ## Feedback
 
 Feature requests and bug reports are welcome on the [DevForum thread](https://devforum.roblox.com/t/3416936) — the roadmap is driven by it.
