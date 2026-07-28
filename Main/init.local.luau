@@ -59,6 +59,14 @@ task.spawn(function()
 	end
 end)
 
+-- the class whose icon is shown on the rows of a given mode
+local function rowClass(option)
+	return (option == "Lights"    and "PointLight")
+		or (option == "Particles" and "ParticleEmitter")
+		or (option == "Triangles" and "MeshPart")
+		or "Model"
+end
+
 -- 7) when an option is selected in the menu...
 ui:onOptionSelected(function(option)
 	mainUI.Body.List.Visible = not (option == "Stats")
@@ -66,22 +74,21 @@ ui:onOptionSelected(function(option)
 
 	heatmap:run(option)
 
-	local cls = (option == "Lights"    and "PointLight")
-		or (option == "Particles" and "ParticleEmitter")
-		or (option == "Triangles" and "MeshPart")
-		or "Model"
-
 	ui:refreshList(
 		heatmap.BigModels,
 		heatmap.MediumModels,
-		cls,
+		rowClass(option),
 		heatmap.colors
 	)
 end)
 
+local statsRunning = true
 task.spawn(function()
-	while true do
-		UIService:createStats(mainUI, statsTemplate)
+	while statsRunning do
+		-- nothing to show while the panel is closed: don't rebuild the rows
+		if widget.Enabled then
+			UIService:createStats(mainUI, statsTemplate, heatmap.colors)
+		end
 		task.wait(0.1)
 	end
 end)
@@ -89,7 +96,32 @@ end)
 -- 8) toggle the widget's visibility
 toggleButton.Click:Connect(function()
 	widget.Enabled = not widget.Enabled
-	if not widget.Enabled then
-		heatmap:clear()
+end)
+
+-- Closing the panel must take the highlight folder out of Workspace, and the
+-- widget can also be closed from its own X button (which never fires the
+-- toolbar Click), so both cases hang off Enabled itself.
+-- Re-opening within the same session restores the highlights and the list as
+-- they were -- handy when the panel gets closed by accident. This lives purely
+-- in memory: nothing is saved to plugin settings.
+widget:GetPropertyChangedSignal("Enabled"):Connect(function()
+	if widget.Enabled then
+		if heatmap:attach() then
+			ui:refreshList(
+				heatmap.BigModels,
+				heatmap.MediumModels,
+				rowClass(heatmap.lastOption),
+				heatmap.colors
+			)
+		end
+	else
+		heatmap:detach()
 	end
+end)
+
+-- the detached folder is only alive as long as this script is: drop it (and the
+-- highlights still in Workspace) when the plugin unloads or reloads
+plugin.Unloading:Connect(function()
+	statsRunning = false
+	heatmap:clear()
 end)

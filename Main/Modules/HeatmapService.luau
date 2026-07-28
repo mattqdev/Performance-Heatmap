@@ -12,6 +12,11 @@ function HeatmapService.new(containerName)
 		folderName   = containerName or "PerformanceHeatmapContainer",
 		BigModels    = {},
 		MediumModels = {},
+		-- last option passed to run(), so the panel can be restored on re-open
+		lastOption   = nil,
+		-- the highlight folder. Kept as a reference because while the panel is
+		-- closed the folder lives outside Workspace (see detach/attach).
+		_folder      = nil,
 		-- cache MeshId -> triangles (or false if it can't be loaded). Persists across runs:
 		-- reloading permission-less meshes on every click is just wasted time.
 		_triCache    = {},
@@ -24,32 +29,86 @@ function HeatmapService.new(containerName)
 	return self
 end
 
--- creates (if needed) and returns the folder that holds the highlights
+-- creates (if needed) and returns the folder that holds the highlights.
+-- Also re-attaches a folder that detach() moved out of Workspace.
 function HeatmapService:ensureFolder()
-	local f = workspace:FindFirstChild(self.folderName)
+	local f = self._folder or workspace:FindFirstChild(self.folderName)
+
+	-- a folder the user deleted from the Explorer is locked: re-parenting it
+	-- throws, so give up on it and build a fresh one
+	if f and f.Parent ~= workspace and not pcall(function() f.Parent = workspace end) then
+		f = nil
+	end
+
 	if not f then
 		f = Instance.new("Folder")
 		f.Name       = self.folderName
 		f.Archivable = false
 		f.Parent     = workspace
 	end
+
+	self._folder = f
 	return f
 end
 
+-- Wipes results and the highlight folder itself (not just its children, so no
+-- empty container is left behind in Workspace).
 function HeatmapService:clear()
-	local f = workspace:FindFirstChild(self.folderName)
-	if f then for _,c in ipairs(f:GetChildren()) do c:Destroy() end end
+	local f = self._folder or workspace:FindFirstChild(self.folderName)
+	if f then pcall(function() f:Destroy() end) end
+	self._folder = nil
 	self.BigModels, self.MediumModels = {}, {}
 end
 
--- sorts both tables by the numeric value extracted from Amount
-function HeatmapService:sortModels()
-	local function extract(str)
-		-- strip thousands separators ("12,345 tris" -> 12345) before reading the number
-		return tonumber(string.match((str:gsub(",", "")), "([%d%.]+)")) or 0
+-- Called when the panel is closed: takes the highlight folder out of Workspace
+-- so it stops cluttering the scene and the Explorer, but keeps it alive in
+-- memory along with the result tables. Re-opening the panel in the same session
+-- can then restore exactly what was there (see attach) with no re-analysis.
+-- Nothing is written to disk or to plugin settings: this is session-only state.
+function HeatmapService:detach()
+	local f = self._folder or workspace:FindFirstChild(self.folderName)
+	if not f then return end
+	self._folder = f
+	pcall(function() f.Parent = nil end)
+end
+
+-- Puts a detached highlight folder back into Workspace.
+-- Returns true when there was something to restore.
+function HeatmapService:attach()
+	local f = self._folder
+	if not f then return false end
+	if f.Parent == workspace then return true end
+	if not pcall(function() f.Parent = workspace end) then
+		self._folder = nil
+		return false
 	end
-	table.sort(self.BigModels, function(a,b) return extract(a.Amount) > extract(b.Amount) end)
-	table.sort(self.MediumModels, function(a,b) return extract(a.Amount) > extract(b.Amount) end)
+	return true
+end
+
+-- Sorts both tables from the most severe to the least.
+-- Entries carry an explicit numeric `Sort`, plus an optional `Group` for modes
+-- that mix metrics which can't be compared with each other (Triangles: real
+-- triangle counts vs. estimates). Higher Group comes first; ties fall back to
+-- the name so the order never depends on Workspace traversal order.
+-- Parsing `Amount` is only a fallback for entries that don't set `Sort`.
+function HeatmapService:sortModels()
+	local function weight(entry)
+		if type(entry.Sort) == "number" then return entry.Sort end
+		-- strip thousands separators ("12,345 tris" -> 12345) before reading the number
+		local s = tostring(entry.Amount):gsub(",", "")
+		return tonumber(string.match(s, "%d+%.?%d*")) or 0
+	end
+
+	local function comparator(a, b)
+		local ga, gb = a.Group or 0, b.Group or 0
+		if ga ~= gb then return ga > gb end
+		local wa, wb = weight(a), weight(b)
+		if wa ~= wb then return wa > wb end
+		return a.Model.Name < b.Model.Name
+	end
+
+	table.sort(self.BigModels, comparator)
+	table.sort(self.MediumModels, comparator)
 end
 
 -- builds a scaled UDim2, in case it's ever needed elsewhere
@@ -127,7 +186,7 @@ function HeatmapService:density()
 			end
 			local dens       = (vol>0) and (count/vol) or 0
 			local amtStr     = string.format("(Density: %.2f)", dens)
-			local entry      = { Model = model, Amount = amtStr }
+			local entry      = { Model = model, Amount = amtStr, Sort = dens }
 			local col        = self.colors.Ok
 
 			if dens < .5 then
@@ -152,7 +211,7 @@ function HeatmapService:count()
 				if d:IsA("BasePart") then c = c + 1 end
 			end
 			local amtStr = string.format("(%d Parts)", c)
-			local entry  = { Model = model, Amount = amtStr }
+			local entry  = { Model = model, Amount = amtStr, Sort = c }
 			local col    = self.colors.Ok
 
 			if c < 10 then
@@ -175,7 +234,7 @@ function HeatmapService:lights()
 			if obj.Range and obj.Range > 0 then
 				local score  = obj.Brightness * obj.Range
 				local amtStr = string.format("(Score: %.2f)", score)
-				local entry  = { Model = obj, Amount = amtStr }
+				local entry  = { Model = obj, Amount = amtStr, Sort = score }
 				local col    = self.colors.Ok
 
 				if score < 30 then
@@ -200,7 +259,7 @@ function HeatmapService:particles()
 			local avgLife    = (lt.Min + lt.Max) / 2
 			local score      = obj.Rate * avgLife * obj.Brightness
 			local amtStr     = string.format("(Score: %.2f)", score)
-			local entry      = { Model = obj, Amount = amtStr }
+			local entry      = { Model = obj, Amount = amtStr, Sort = score }
 			local col        = self.colors.Ok
 
 			if score < 30 then
@@ -291,21 +350,25 @@ function HeatmapService:triangles()
 	for _,obj in ipairs(workspace:GetDescendants()) do
 		if obj:IsA("MeshPart") then
 			local tris = self:meshTriangleCount(obj)
-			local amtStr, bucket
+			local amtStr, bucket, sort, group
 
 			if tris ~= nil then
 				measured = measured + 1
 				amtStr = string.format("(%s tris)", HeatmapService.commaNumber(tris))
 				bucket = (tris < 2000 and "Ok") or (tris < 10000 and "Medium") or "Big"
+				-- measured meshes rank above estimated ones: a triangle count and an
+				-- estimate score are different units and can't be ordered together
+				sort, group = tris, 1
 			else
 				estimated = estimated + 1
 				local score, reasons = self:meshCostEstimate(obj)
 				local why = (#reasons > 0) and (" · " .. table.concat(reasons, ", ")) or ""
 				amtStr = string.format("(est. %.1f%s)", score, why)
 				bucket = (score < 5 and "Ok") or (score < 12 and "Medium") or "Big"
+				sort, group = score, 0
 			end
 
-			local entry = { Model = obj, Amount = amtStr }
+			local entry = { Model = obj, Amount = amtStr, Sort = sort, Group = group }
 			if bucket == "Big" then
 				table.insert(self.BigModels, entry)
 			elseif bucket == "Medium" then
@@ -328,6 +391,7 @@ end
 -- Dispatches to the right routine based on the option
 function HeatmapService:run(option, mainUI)
 	self:clear()
+	self.lastOption = option
 	if option == "Density"  then self:density()
 	elseif option == "Count"    then self:count()
 	elseif option == "Lights"   then self:lights()

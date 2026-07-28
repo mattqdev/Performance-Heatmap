@@ -14,7 +14,7 @@ A Roblox Studio plugin that scans your `Workspace` and highlights the objects mo
 
 ## Heatmap modes
 
-Pick a mode from the panel header and the plugin colours the offenders directly in the viewport — red for the worst, yellow for borderline, green for fine — and lists them sorted worst-first. Clicking a row selects the instance.
+Pick a mode from the panel header and the plugin colours the offenders directly in the viewport — red for the worst, yellow for borderline, green for fine — and lists them sorted worst-first within each section. The **BIG ELEMENTS** / **MEDIUM ELEMENTS** headers show how many items fell into each bucket. Clicking a row selects the instance.
 
 | Mode          | What it looks at                                                                                    |
 | ------------- | --------------------------------------------------------------------------------------------------- |
@@ -26,11 +26,15 @@ Pick a mode from the panel header and the plugin colours the offenders directly 
 
 ### About the Triangles mode
 
-Where possible the real triangle count is read from the mesh via `AssetService:CreateEditableMeshAsync`. That API only works on assets you own, so most Toolbox and Marketplace meshes can't be measured — those fall back to a rough cost estimate from `RenderFidelity`, `CollisionFidelity` and bounding-box size, and are always labelled `(stima …)`. An estimate is never presented as a measured triangle count.
+Where possible the real triangle count is read from the mesh via `AssetService:CreateEditableMeshAsync`. That API only works on assets you own, so most Toolbox and Marketplace meshes can't be measured — those fall back to a rough cost estimate from `RenderFidelity`, `CollisionFidelity` and bounding-box size, and are always labelled `(est. …)`. An estimate is never presented as a measured triangle count. Measured meshes are listed above estimated ones, since a triangle count and an estimate score aren't the same unit and can't be ranked against each other.
+
+## Highlights in your scene
+
+The highlight parts live in a non-`Archivable` `PerformanceHeatmapContainer` folder in `Workspace`. Closing the panel removes that folder from `Workspace`; re-opening it in the same Studio session puts the previous scan back exactly as it was, so accidentally closing the panel costs you nothing. Nothing is persisted — reopening the place starts clean.
 
 ## Stats panel
 
-A live readout of `Stats` service metrics (including `SceneDrawcallCount` and `SceneTriangleCount`), refreshed continuously while the widget is open. The tracked list lives in `Main/Modules/UIService/Properties.luau`.
+A live readout of `Stats` service metrics (including `SceneDrawcallCount` and `SceneTriangleCount`), refreshed continuously while the widget is open. Each value is coloured green / yellow / red against a rough budget for a mid-range device, so you can see at a glance whether a metric looks healthy. Those budgets are rules of thumb, not engine limits: red means "worth investigating". The tracked list and its thresholds live in `Main/Modules/UIService/Properties.luau`.
 
 ## A note on accuracy
 
@@ -46,7 +50,7 @@ Main/
   Modules/
     HeatmapService.luau           analysis + viewport highlighting
     UIService/init.luau           panel, results list, stats rendering
-    UIService/Properties.luau     declarative list of tracked Stats metrics
+    UIService/Properties.luau     tracked Stats metrics + their good/warn budgets
     Anim.luau                     TweenService hover/click animations
     Version.luau                  current version + semver helpers
     UpdateChecker.luau            checks version.json on GitHub for updates

@@ -1,5 +1,5 @@
 {
-  "version": "1.4.1",
+  "version": "1.5.0",
   "url": "https://create.roblox.com/store/asset/89564204038561",
-  "notes": "Versioned release: added semantic versioning, in-plugin update check, and the Triangles heatmap mode (real per-MeshPart triangle counts via EditableMesh)."
+  "notes": "Closing the panel now removes PerformanceHeatmapContainer from Workspace and re-opening it in the same session restores the previous scan; item counts on the BIG/MEDIUM section headers; deterministic severity ordering in every mode (Triangles included); color-coded values in the Stats panel."
 }
