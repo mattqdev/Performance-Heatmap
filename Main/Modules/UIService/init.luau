@@ -1,14 +1,14 @@
--- Modules/UIService.lua
-local UIService    = {}
-UIService.__index  = UIService
+-- UIService.luau -- everything that draws into the panel.
+
+local UIService   = {}
+UIService.__index = UIService
 
 local StudioService = game:GetService("StudioService")
 local Selection     = game:GetService("Selection")
-local STATS = game:GetService("Stats")
+local RunService    = game:GetService("RunService")
+local Stats         = game:GetService("Stats")
 
-local FetchProp = require(script.Properties)
-
-local connections = {}
+local Properties = require(script.Properties)
 
 -- Same palette as HeatmapService.colors; used when no colors are passed in.
 local DEFAULT_COLORS = {
@@ -17,37 +17,35 @@ local DEFAULT_COLORS = {
 	Ok     = Color3.fromRGB(0,   255,   0),
 }
 
--- The section headers live in the plugin's GUI, so their Text may already carry
--- a count from a previous session that got saved into the place file: strip it
--- before using it as the base label.
-local function baseTitle(label)
-	return (label.Text:gsub("%s*%(%d+%)%s*$", ""))
-end
+-- Section titles are set from here rather than read from the place file. The
+-- old labels ("BIG ELEMENTS" / "MEDIUM ELEMENTS") described the objects' size,
+-- which is not what the buckets mean -- an item is in the top bucket because it
+-- looks expensive, not because it is large.
+local HEADER_TITLES = {
+	HeaderBig    = "HIGH COST",
+	HeaderMedium = "MODERATE",
+}
 
-function UIService.new(mouse, animModule, main, template, Statstemp)
+function UIService.new(mouse, animModule, main, template, statsTemplate)
 	local self = setmetatable({
-		mouse     = mouse,
-		anim      = animModule,
-		mainUI    = main,
-		template  = template,
-		statsTemplate  = Statstemp,
-		-- header name -> label text without the count suffix
-		headerTitles   = {},
+		mouse         = mouse,
+		anim          = animModule,
+		mainUI        = main,
+		template      = template,
+		statsTemplate = statsTemplate,
+
+		-- Stats rows are built once and then only have their text updated; see
+		-- ensureStats. Maps Properties index -> the row's value label.
+		_statRows  = nil,
+		_statsBuilt = false,
 	}, UIService)
 
-	for _,headerName in ipairs({ "HeaderBig", "HeaderMedium" }) do
-		local header = main.Body.List:FindFirstChild(headerName)
-		if header and header:FindFirstChild("Title") then
-			self.headerTitles[headerName] = baseTitle(header.Title)
-		end
-	end
-
 	-- bind the menu Frame-buttons to their callbacks
-	for _,btn in ipairs(main.Body.Head:GetChildren()) do
-		if btn:IsA("Frame") then
-			animModule.button(btn, mouse)
-			btn.Click.MouseButton1Down:Connect(function()
-				self:fire(btn.Name)
+	for _, button in ipairs(main.Body.Head:GetChildren()) do
+		if button:IsA("Frame") then
+			animModule.button(button, mouse)
+			button.Click.MouseButton1Down:Connect(function()
+				self:fire(button.Name)
 			end)
 		end
 	end
@@ -65,14 +63,16 @@ function UIService:fire(option)
 	end
 end
 
--- Modules/UIService.lua
-function UIService:refreshList(bigList, medList, instanceClass, colors)
+-- Results list -------------------------------------------------------------
+
+function UIService:refreshList(bigList, medList, colors)
 	local list = self.mainUI.Body.List
 	colors = colors or DEFAULT_COLORS
 
-	-- clear the list
-	for _,child in ipairs(list:GetChildren()) do
-		if child.Name == "Template" then child:Destroy() end
+	for _, child in ipairs(list:GetChildren()) do
+		if child.Name == "Template" then
+			child:Destroy()
+		end
 	end
 
 	-- Every child gets its own LayoutOrder, in the order it's created: the lists
@@ -80,122 +80,185 @@ function UIService:refreshList(bigList, medList, instanceClass, colors)
 	-- final order up to the sibling order inside the ScrollingFrame.
 	local order = 0
 	local function nextOrder()
-		order = order + 1
+		order += 1
 		return order
 	end
 
-	local function mkRow(data, color)
+	-- The icon comes from the row's own instance, so a mode that reports mixed
+	-- classes (Overlap and Texture both do) shows the right one per row instead
+	-- of one class hard-coded for the whole mode.
+	local function classIcon(instance)
+		local ok, icon = pcall(function()
+			return StudioService:GetClassIcon(instance.ClassName).Image
+		end)
+		return ok and icon or ""
+	end
+
+	local function makeRow(entry, color)
 		local row = self.template:Clone()
 		row.Parent            = list
-		row.Title.Text        = data.Model.Name
-		row.Amount.Text       = data.Amount
+		row.Title.Text        = entry.Instance.Name
+		row.Amount.Text       = entry.Amount
 		row.Amount.TextColor3 = color
-		row.Icon.Image        = StudioService:GetClassIcon(instanceClass).Image
+		row.Icon.Image        = classIcon(entry.Instance)
 		row.LayoutOrder       = nextOrder()
 
 		self.anim.hover(row.View, row.View)
 		self.anim.Click(row.View, row.View)
 		row.View.MouseButton1Down:Connect(function()
-			Selection:Set({ data.Model })
+			Selection:Set({ entry.Instance })
 		end)
 	end
 
-	-- places the section header and shows how many items it holds
-	local function mkHeader(headerName, count)
+	local function makeHeader(headerName, count)
 		local header = list:FindFirstChild(headerName)
-		if not header then return end
+		if not header then
+			return
+		end
 		header.LayoutOrder = nextOrder()
 
 		local label = header:FindFirstChild("Title")
 		if label then
-			local base = self.headerTitles[headerName] or baseTitle(label)
-			self.headerTitles[headerName] = base
-			label.Text = string.format("%s (%d)", base, count)
+			label.Text = string.format("%s (%d)", HEADER_TITLES[headerName] or headerName, count)
 		end
 	end
 
-	-- use the colors passed in from HeatmapService
-	mkHeader("HeaderBig", #bigList)
-	for _,r in ipairs(bigList) do mkRow(r, colors.Big) end
+	makeHeader("HeaderBig", #bigList)
+	for _, entry in ipairs(bigList) do
+		makeRow(entry, colors.Big)
+	end
 
-	mkHeader("HeaderMedium", #medList)
-	for _,r in ipairs(medList) do mkRow(r, colors.Medium) end
+	makeHeader("HeaderMedium", #medList)
+	for _, entry in ipairs(medList) do
+		makeRow(entry, colors.Medium)
+	end
 end
 
-function UIService:createStats(mainUI, template, colors)
-	local statsFrame = mainUI.Body.Stats
-	colors = colors or DEFAULT_COLORS
+-- Stats panel --------------------------------------------------------------
 
-	-- 1) Clear the container (stat and divider rows)
+-- In edit mode the Stats service reports *Studio*, not your game: frame and
+-- render timings include the editor viewport, the selection gizmos and every
+-- dock widget, and bandwidth is whatever Studio is talking to. Those rows are
+-- built greyed out with a note, rather than being coloured against a budget they
+-- have no relationship to.
+local function isPlaying()
+	return RunService:IsRunning()
+end
+
+local function meaningfulHere(row)
+	return not row.PlayOnly or isPlaying()
+end
+
+-- Green up to `Good`, yellow up to `Warn`, red past it (reversed when
+-- HigherIsBetter). Rows without thresholds keep the template's neutral colour.
+-- These budgets are rules of thumb, not engine limits: red means "worth a look",
+-- not "broken".
+local function valueColor(row, value, colors)
+	if type(row.Good) ~= "number" or type(row.Warn) ~= "number" then
+		return nil
+	end
+	if row.HigherIsBetter then
+		if value >= row.Good then return colors.Ok end
+		if value >= row.Warn then return colors.Medium end
+		return colors.Big
+	end
+	if value <= row.Good then return colors.Ok end
+	if value <= row.Warn then return colors.Medium end
+	return colors.Big
+end
+
+local function readStat(name)
+	local ok, value = pcall(function()
+		return Stats[name]
+	end)
+	return (ok and type(value) == "number") and value or nil
+end
+
+-- Builds the rows once. The old code destroyed and recreated all ~22 rows and
+-- rebound all ~22 property signals every 0.1s -- several hundred instances per
+-- second of pure churn for a panel whose layout never changes.
+function UIService:ensureStats(mainUI, template)
+	if self._statsBuilt then
+		return
+	end
+
+	local statsFrame = mainUI.Body.Stats
+
 	for _, child in ipairs(statsFrame:GetChildren()) do
 		if child.Name == "Stat" or child.Name == "Divider" then
 			child:Destroy()
 		end
 	end
 
-	-- 2) Visual index for the value: green up to `Good`, yellow up to `Warn`,
-	-- red beyond it (reversed when HigherIsBetter). Rows in Properties.luau
-	-- without thresholds keep the template's neutral color -- these budgets are
-	-- rules of thumb, not engine limits, so a red row means "worth a look",
-	-- not "broken".
-	local function valueColor(data, val)
-		if type(data.Good) ~= "number" or type(data.Warn) ~= "number" then
-			return nil
-		end
-		if data.HigherIsBetter then
-			if val >= data.Good then return colors.Ok end
-			if val >= data.Warn then return colors.Medium end
-			return colors.Big
-		end
-		if val <= data.Good then return colors.Ok end
-		if val <= data.Warn then return colors.Medium end
-		return colors.Big
-	end
+	self._statRows = {}
 
-	-- 3) Helper to round to 4 decimals
-	local function setValueLabel(row, data, val)
-		local mult = 10 ^ 4
-		row.Amount.Text = tostring(math.floor(val * mult + 0.5) / mult)
-
-		local color = valueColor(data, val)
-		if color then
-			row.Amount.TextColor3 = color
-		end
-	end
-
-	-- 4) Iterate over FetchProp
-	for i, data in ipairs(FetchProp) do
-		if data.Divider then
-			-- create a simple TextLabel as a divider
-			local hdr = script.Divider:Clone()
-			hdr.Title.Text               = data.Title
-			hdr.LayoutOrder        = i
-			hdr.Parent             = statsFrame
+	for index, row in ipairs(Properties) do
+		if row.Divider then
+			local header = script.Divider:Clone()
+			header.Title.Text  = row.Title
+			header.LayoutOrder = index
+			header.Parent      = statsFrame
 		else
-			-- create the Stat row
-			local row = template:Clone()
-			row.Name               = "Stat"
-			row.Parent             = statsFrame
-			row.LayoutOrder        = i
+			local widget = template:Clone()
+			widget.Name        = "Stat"
+			widget.LayoutOrder = index
+			widget.Parent      = statsFrame
 
-			-- set titles and description
-			row.Container.Title.Text = data.Name
-			row.Container.Desc.Text  = data.Description
+			widget.Container.Title.Text = row.Name
 
-			-- initial value
-			setValueLabel(row, data, STATS[data.Name])
-
-			-- bind the signal, disconnecting any previous connection
-			if connections[data.Name] then
-				connections[data.Name]:Disconnect()
-			end
-			connections[data.Name] = STATS:GetPropertyChangedSignal(data.Name)
-				:Connect(function()
-					setValueLabel(row, data, STATS[data.Name])
-				end)
+			table.insert(self._statRows, {
+				data        = row,
+				label       = widget.Amount,
+				description = widget.Container.Desc,
+			})
 		end
+	end
+
+	self._statsBuilt = true
+	self:_applyDescriptions()
+end
+
+-- The PlayOnly note has to follow the Studio play state, because a plugin keeps
+-- running across Play Solo -- a panel still saying "edit mode" once the game is
+-- running would be its own small lie. Only rewritten when the state flips.
+function UIService:_applyDescriptions()
+	local playing = isPlaying()
+	if self._descriptionsFor == playing then
+		return
+	end
+	self._descriptionsFor = playing
+
+	for _, entry in ipairs(self._statRows) do
+		entry.description.Text = meaningfulHere(entry.data)
+			and entry.data.Description
+			or (entry.data.Description .. " (edit mode: this is Studio, not your game)")
 	end
 end
 
+-- Cheap per-tick refresh: sets two properties per row, creates nothing.
+function UIService:updateStats(colors)
+	if not self._statRows then
+		return
+	end
+	colors = colors or DEFAULT_COLORS
+	self:_applyDescriptions()
+
+	for _, entry in ipairs(self._statRows) do
+		local value = readStat(entry.data.Name)
+
+		if value == nil then
+			entry.label.Text = "n/a"
+		else
+			entry.label.Text = tostring(math.floor(value * 10000 + 0.5) / 10000)
+
+			if meaningfulHere(entry.data) then
+				local color = valueColor(entry.data, value, colors)
+				if color then
+					entry.label.TextColor3 = color
+				end
+			end
+		end
+	end
+end
 
 return UIService

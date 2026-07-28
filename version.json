@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0",
+  "version": "1.6.0",
   "url": "https://create.roblox.com/store/asset/89564204038561",
-  "notes": "Closing the panel now removes PerformanceHeatmapContainer from Workspace and re-opening it in the same session restores the previous scan; item counts on the BIG/MEDIUM section headers; deterministic severity ordering in every mode (Triangles included); color-coded values in the Stats panel."
+  "notes": "Highlights are now adornments under CoreGui instead of Parts in Workspace: nothing is added to your scene, the plugin no longer inflates the Stats it reports, highlights follow objects that move and no longer block clicking them. Scans run on a time budget with progress in the widget title and are cancelled by picking another mode, so large places no longer freeze Studio. New Texture mode (texture memory pressure and one-off images) and Overlap mode (buried geometry and z-fighting candidates) replace the two menu buttons that previously did nothing. Density now measures parts per 1,000 studs3 of the model's bounding box, part counts are attributed to the nearest Model instead of every ancestor, lights account for Shadows, and particles are scored by overdraw rather than Brightness. The Stats panel is built once instead of being rebuilt ten times a second, and metrics that only describe Studio in edit mode are greyed out and labelled."
 }

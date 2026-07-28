@@ -1,404 +1,184 @@
+-- HeatmapService.luau
+-- Orchestrates a scan: build the shared index once, hand it to the selected
+-- analyzer, bucket and sort what comes back, then paint the worst offenders.
+--
+-- The analysis itself lives in Modules/Analyzers/*, the drawing in
+-- Modules/Highlighter, the traversal in Modules/WorkspaceIndex. This file only
+-- sequences them and owns the run lifecycle (progress, cancellation, results).
+
 local HeatmapService = {}
 HeatmapService.__index = HeatmapService
 
-local workspace       = game:GetService("Workspace")
-local StudioService   = game:GetService("StudioService")
-local AssetService    = game:GetService("AssetService")
+local Analyzers      = require(script.Parent.Analyzers)
+local Budget         = require(script.Parent.Budget)
+local Highlighter    = require(script.Parent.Highlighter)
+local WorkspaceIndex = require(script.Parent.WorkspaceIndex)
 
-local UIService = require(script.Parent.UIService)
+function HeatmapService.new(options)
+	options = options or {}
 
-function HeatmapService.new(containerName)
 	local self = setmetatable({
-		folderName   = containerName or "PerformanceHeatmapContainer",
 		BigModels    = {},
 		MediumModels = {},
-		-- last option passed to run(), so the panel can be restored on re-open
-		lastOption   = nil,
-		-- the highlight folder. Kept as a reference because while the panel is
-		-- closed the folder lives outside Workspace (see detach/attach).
-		_folder      = nil,
-		-- cache MeshId -> triangles (or false if it can't be loaded). Persists across runs:
-		-- reloading permission-less meshes on every click is just wasted time.
-		_triCache    = {},
+
+		-- last mode passed to run(), so re-opening the panel can re-render
+		lastOption = nil,
+		-- last analyzer summary, re-warned on demand rather than on every render
+		lastSummary = nil,
+
+		scanning = false,
+
+		-- bumped on every run; a scan whose token is stale must not write results
+		_token   = 0,
+		_budget  = nil,
+
+		_highlighter = Highlighter.new(
+			options.folderName or "PerformanceHeatmapAdornments",
+			options.maxHighlights
+		),
+
 		colors = {
 			Big    = Color3.fromRGB(255,   0,   0),
 			Medium = Color3.fromRGB(255, 255,   0),
 			Ok     = Color3.fromRGB(0,   255,   0),
-		}
+		},
 	}, HeatmapService)
+
 	return self
 end
 
--- creates (if needed) and returns the folder that holds the highlights.
--- Also re-attaches a folder that detach() moved out of Workspace.
-function HeatmapService:ensureFolder()
-	local f = self._folder or workspace:FindFirstChild(self.folderName)
-
-	-- a folder the user deleted from the Explorer is locked: re-parenting it
-	-- throws, so give up on it and build a fresh one
-	if f and f.Parent ~= workspace and not pcall(function() f.Parent = workspace end) then
-		f = nil
-	end
-
-	if not f then
-		f = Instance.new("Folder")
-		f.Name       = self.folderName
-		f.Archivable = false
-		f.Parent     = workspace
-	end
-
-	self._folder = f
-	return f
-end
-
--- Wipes results and the highlight folder itself (not just its children, so no
--- empty container is left behind in Workspace).
-function HeatmapService:clear()
-	local f = self._folder or workspace:FindFirstChild(self.folderName)
-	if f then pcall(function() f:Destroy() end) end
-	self._folder = nil
-	self.BigModels, self.MediumModels = {}, {}
-end
-
--- Called when the panel is closed: takes the highlight folder out of Workspace
--- so it stops cluttering the scene and the Explorer, but keeps it alive in
--- memory along with the result tables. Re-opening the panel in the same session
--- can then restore exactly what was there (see attach) with no re-analysis.
--- Nothing is written to disk or to plugin settings: this is session-only state.
-function HeatmapService:detach()
-	local f = self._folder or workspace:FindFirstChild(self.folderName)
-	if not f then return end
-	self._folder = f
-	pcall(function() f.Parent = nil end)
-end
-
--- Puts a detached highlight folder back into Workspace.
--- Returns true when there was something to restore.
-function HeatmapService:attach()
-	local f = self._folder
-	if not f then return false end
-	if f.Parent == workspace then return true end
-	if not pcall(function() f.Parent = workspace end) then
-		self._folder = nil
-		return false
-	end
-	return true
-end
-
--- Sorts both tables from the most severe to the least.
--- Entries carry an explicit numeric `Sort`, plus an optional `Group` for modes
--- that mix metrics which can't be compared with each other (Triangles: real
--- triangle counts vs. estimates). Higher Group comes first; ties fall back to
--- the name so the order never depends on Workspace traversal order.
--- Parsing `Amount` is only a fallback for entries that don't set `Sort`.
+-- Sorts both tables from most severe to least.
+-- `Group` (higher first) comes before `Sort` so modes that mix incomparable
+-- metrics keep them apart; ties fall back to the name, so the order never
+-- depends on Workspace traversal order.
 function HeatmapService:sortModels()
-	local function weight(entry)
-		if type(entry.Sort) == "number" then return entry.Sort end
-		-- strip thousands separators ("12,345 tris" -> 12345) before reading the number
-		local s = tostring(entry.Amount):gsub(",", "")
-		return tonumber(string.match(s, "%d+%.?%d*")) or 0
-	end
-
 	local function comparator(a, b)
-		local ga, gb = a.Group or 0, b.Group or 0
-		if ga ~= gb then return ga > gb end
-		local wa, wb = weight(a), weight(b)
-		if wa ~= wb then return wa > wb end
-		return a.Model.Name < b.Model.Name
+		local groupA, groupB = a.Group or 0, b.Group or 0
+		if groupA ~= groupB then
+			return groupA > groupB
+		end
+		if a.Sort ~= b.Sort then
+			return a.Sort > b.Sort
+		end
+		return a.Instance.Name < b.Instance.Name
 	end
 
 	table.sort(self.BigModels, comparator)
 	table.sort(self.MediumModels, comparator)
 end
 
--- builds a scaled UDim2, in case it's ever needed elsewhere
-function HeatmapService.scaleUDim2(size, factor)
-	return UDim2.new(
-		size.X.Scale  * factor, size.X.Offset  * factor,
-		size.Y.Scale  * factor, size.Y.Offset  * factor
-	)
-end
+-- Paints the worst offenders. "Ok" items are deliberately not drawn: the old
+-- behaviour created a highlight for every single object that was fine, which on
+-- a large place meant tens of thousands of instances spent saying "nothing to
+-- see here" -- and turned the viewport into a wall of colour where nothing
+-- stands out.
+function HeatmapService:_paint()
+	self._highlighter:clear()
 
--- formats an integer with thousands separators (12345 -> "12,345")
-function HeatmapService.commaNumber(n)
-	local s = tostring(math.floor(n + 0.5))
-	local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
-	return (out:gsub("^,", ""))
-end
+	for _, entry in ipairs(self.BigModels) do
+		if not self._highlighter:add(entry.Instance, self.colors.Big) then
+			return
+		end
+	end
 
--- Creates the highlight parts for a whole Model
-function HeatmapService:createHighlight(model, color)
-	local folder = self:ensureFolder()
-	for _,desc in ipairs(model:GetDescendants()) do
-		if desc:IsA("BasePart") then
-			local h = Instance.new("Part")
-			h.Size         = desc.Size + Vector3.new(1,1,1)
-			h.CFrame       = desc.CFrame
-			h.Anchored     = true
-			h.CanCollide   = false
-			h.Transparency = .5
-			h.BrickColor   = BrickColor.new(color)
-			h.Archivable   = false
-			h.Parent       = folder
+	for _, entry in ipairs(self.MediumModels) do
+		if not self._highlighter:add(entry.Instance, self.colors.Medium) then
+			return
 		end
 	end
 end
 
--- Highlights a BasePart directly (e.g. the MeshPart itself)
-function HeatmapService:createHighlightPart(part, color)
-	local h = Instance.new("Part")
-	h.Size         = part.Size + Vector3.new(1,1,1)
-	h.CFrame       = part.CFrame
-	h.Anchored     = true
-	h.CanCollide   = false
-	h.Transparency = .5
-	h.BrickColor   = BrickColor.new(color)
-	h.Archivable   = false
-	h.Parent       = self:ensureFolder()
-end
-
--- Creates the highlight for objects such as lights or emitters
-function HeatmapService:createHighlightInstance(obj, color)
-	local p = obj.Parent
-	if p and p:IsA("BasePart") then
-		local h = Instance.new("Part")
-		h.Size         = p.Size + Vector3.new(1,1,1)
-		h.CFrame       = p.CFrame
-		h.Anchored     = true
-		h.CanCollide   = false
-		h.Transparency = .5
-		h.BrickColor   = BrickColor.new(color)
-		h.Archivable   = false
-		h.Parent       = self:ensureFolder()
+-- Cancels any scan in flight. The running coroutine notices at its next
+-- budget:step() and unwinds without touching the result tables.
+function HeatmapService:cancel()
+	if self._budget then
+		self._budget:cancel()
+		self._budget = nil
 	end
+	self.scanning = false
 end
 
--- Analysis methods
-function HeatmapService:density()
-	for _,model in ipairs(workspace:GetDescendants()) do
-		if model:IsA("Model") then
-			local count, vol = 0, 0
-			for _,d in ipairs(model:GetDescendants()) do
-				if d:IsA("BasePart") then
-					vol  = vol + (d.Size.X * d.Size.Y * d.Size.Z)
-					count = count + 1
-				end
-			end
-			local dens       = (vol>0) and (count/vol) or 0
-			local amtStr     = string.format("(Density: %.2f)", dens)
-			local entry      = { Model = model, Amount = amtStr, Sort = dens }
-			local col        = self.colors.Ok
+function HeatmapService:clear()
+	self:cancel()
+	self._highlighter:clear()
+	self.BigModels, self.MediumModels = {}, {}
+	self.lastSummary = nil
+end
 
-			if dens < .5 then
-				col = self.colors.Ok
-			elseif dens < .8 then
-				col = self.colors.Medium
-				table.insert(self.MediumModels, entry)
-			else
-				col = self.colors.Big
-				table.insert(self.BigModels, entry)
-			end
-			self:createHighlight(model, col)
+-- Panel closed / opened. Results stay in memory so re-opening restores the
+-- previous scan verbatim; nothing is written to disk or to plugin settings.
+function HeatmapService:setVisible(visible)
+	self._highlighter:setVisible(visible)
+end
+
+function HeatmapService:hasResults()
+	return #self.BigModels > 0 or #self.MediumModels > 0
+end
+
+-- How many highlights the cap dropped (0 when everything fit on screen).
+function HeatmapService:skippedHighlights()
+	return self._highlighter:skipped()
+end
+
+-- Runs `option`. Yields. Returns true when the scan completed, false when it was
+-- cancelled or the mode is unknown.
+--
+-- onProgress(label, done, total) is called throughout, so the caller can show
+-- progress somewhere -- currently the widget title, which is the only piece of
+-- panel chrome that lives in code rather than in the place file.
+function HeatmapService:run(option, onProgress)
+	local analyzer = Analyzers.byId[option]
+	if not analyzer then
+		return false
+	end
+
+	-- a click while a scan is running supersedes it
+	self:cancel()
+
+	self._token += 1
+	local token = self._token
+
+	self.BigModels, self.MediumModels = {}, {}
+	self.lastOption  = option
+	self.lastSummary = nil
+
+	local budget = Budget.new(onProgress)
+	self._budget  = budget
+	self.scanning = true
+
+	local index = WorkspaceIndex.build(budget)
+	if not index or budget:cancelled() or token ~= self._token then
+		return false
+	end
+
+	local findings, summary = analyzer.scan(index, budget)
+	if not findings or budget:cancelled() or token ~= self._token then
+		return false
+	end
+
+	budget:setPhase("Sorting", #findings)
+
+	for _, finding in ipairs(findings) do
+		if finding.Bucket == "Big" then
+			table.insert(self.BigModels, finding)
+		elseif finding.Bucket == "Medium" then
+			table.insert(self.MediumModels, finding)
 		end
-	end
-end
-
-function HeatmapService:count()
-	for _,model in ipairs(workspace:GetDescendants()) do
-		if model:IsA("Model") then
-			local c = 0
-			for _,d in ipairs(model:GetDescendants()) do
-				if d:IsA("BasePart") then c = c + 1 end
-			end
-			local amtStr = string.format("(%d Parts)", c)
-			local entry  = { Model = model, Amount = amtStr, Sort = c }
-			local col    = self.colors.Ok
-
-			if c < 10 then
-				col = self.colors.Ok
-			elseif c < 50 then
-				col = self.colors.Medium
-				table.insert(self.MediumModels, entry)
-			else
-				col = self.colors.Big
-				table.insert(self.BigModels, entry)
-			end
-			self:createHighlight(model, col)
-		end
-	end
-end
-
-function HeatmapService:lights()
-	for _,obj in ipairs(workspace:GetDescendants()) do
-		if obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight") then
-			if obj.Range and obj.Range > 0 then
-				local score  = obj.Brightness * obj.Range
-				local amtStr = string.format("(Score: %.2f)", score)
-				local entry  = { Model = obj, Amount = amtStr, Sort = score }
-				local col    = self.colors.Ok
-
-				if score < 30 then
-					col = self.colors.Ok
-				elseif score < 100 then
-					col = self.colors.Medium
-					table.insert(self.MediumModels, entry)
-				else
-					col = self.colors.Big
-					table.insert(self.BigModels, entry)
-				end
-				self:createHighlightInstance(obj, col)
-			end
-		end
-	end
-end
-
-function HeatmapService:particles()
-	for _,obj in ipairs(workspace:GetDescendants()) do
-		if obj:IsA("ParticleEmitter") then
-			local lt         = obj.Lifetime
-			local avgLife    = (lt.Min + lt.Max) / 2
-			local score      = obj.Rate * avgLife * obj.Brightness
-			local amtStr     = string.format("(Score: %.2f)", score)
-			local entry      = { Model = obj, Amount = amtStr, Sort = score }
-			local col        = self.colors.Ok
-
-			if score < 30 then
-				col = self.colors.Ok
-			elseif score < 100 then
-				col = self.colors.Medium
-				table.insert(self.MediumModels, entry)
-			else
-				col = self.colors.Big
-				table.insert(self.BigModels, entry)
-			end
-			self:createHighlightInstance(obj, col)
-		end
-	end
-end
-
--- Counts the real triangles of a MeshPart via EditableMesh.
--- Returns a number, or nil if the mesh can't be measured (permissions/format).
--- Results are cached per MeshId so each unique mesh loads only once.
-function HeatmapService:meshTriangleCount(meshPart)
-	self._triCache = self._triCache or {}
-
-	local id = meshPart.MeshId
-	local cacheKey = (id ~= nil and id ~= "") and id or nil
-	if cacheKey and self._triCache[cacheKey] ~= nil then
-		local c = self._triCache[cacheKey]
-		return (c ~= false) and c or nil
-	end
-
-	local count
-	local ok, em = pcall(function()
-		local content
-		if id ~= nil and id ~= "" then
-			content = Content.fromUri(id)
-		else
-			content = meshPart.MeshContent -- newer MeshParts without a MeshId
-		end
-		return AssetService:CreateEditableMeshAsync(content)
-	end)
-
-	if ok and em then
-		count = #em:GetFaces()
-		em:Destroy() -- free immediately: EditableMeshes are memory-heavy
-	else
-		count = false -- not loadable (permissions/format)
-	end
-
-	if cacheKey then
-		self._triCache[cacheKey] = count
-	end
-	return (count ~= false) and count or nil
-end
-
--- Cost proxy for MeshParts that CAN'T be measured: uses only always-readable
--- properties (fidelity + size). It is NOT a triangle count, and is labelled
--- "est." accordingly -- we never pass a heuristic off as real data.
-function HeatmapService:meshCostEstimate(part)
-	local score   = part.Size.Magnitude / 10
-	local reasons = {}
-
-	if part.RenderFidelity == Enum.RenderFidelity.Precise then
-		score = score + 6
-		table.insert(reasons, "Render=Precise")
-	elseif part.RenderFidelity == Enum.RenderFidelity.Automatic then
-		score = score + 2
-	end
-
-	if part.CanCollide then
-		if part.CollisionFidelity == Enum.CollisionFidelity.PreciseConvexDecomposition then
-			score = score + 6
-			table.insert(reasons, "Collision=Precise")
-		elseif part.CollisionFidelity == Enum.CollisionFidelity.Default then
-			score = score + 3
-			table.insert(reasons, "Collision=Default")
+		if not budget:step() then
+			return false
 		end
 	end
 
-	return score, reasons
-end
-
--- MeshPart cost heatmap.
--- Where permissions allow it uses the REAL triangle count (EditableMesh);
--- otherwise it falls back to the estimate, so the list isn't empty on scenes
--- built from third-party assets (which is the common case).
-function HeatmapService:triangles()
-	local measured, estimated = 0, 0
-
-	for _,obj in ipairs(workspace:GetDescendants()) do
-		if obj:IsA("MeshPart") then
-			local tris = self:meshTriangleCount(obj)
-			local amtStr, bucket, sort, group
-
-			if tris ~= nil then
-				measured = measured + 1
-				amtStr = string.format("(%s tris)", HeatmapService.commaNumber(tris))
-				bucket = (tris < 2000 and "Ok") or (tris < 10000 and "Medium") or "Big"
-				-- measured meshes rank above estimated ones: a triangle count and an
-				-- estimate score are different units and can't be ordered together
-				sort, group = tris, 1
-			else
-				estimated = estimated + 1
-				local score, reasons = self:meshCostEstimate(obj)
-				local why = (#reasons > 0) and (" · " .. table.concat(reasons, ", ")) or ""
-				amtStr = string.format("(est. %.1f%s)", score, why)
-				bucket = (score < 5 and "Ok") or (score < 12 and "Medium") or "Big"
-				sort, group = score, 0
-			end
-
-			local entry = { Model = obj, Amount = amtStr, Sort = sort, Group = group }
-			if bucket == "Big" then
-				table.insert(self.BigModels, entry)
-			elseif bucket == "Medium" then
-				table.insert(self.MediumModels, entry)
-			end
-			self:createHighlightPart(obj, self.colors[bucket])
-		end
-	end
-
-	if estimated > 0 then
-		warn(string.format(
-			"[Performance Heatmap] Triangles: %d MeshPart(s) measured, %d estimated. " ..
-			"Meshes without read permission don't expose real triangles: " ..
-			"the estimate uses RenderFidelity/CollisionFidelity/size.",
-			measured, estimated
-		))
-	end
-end
-
--- Dispatches to the right routine based on the option
-function HeatmapService:run(option, mainUI)
-	self:clear()
-	self.lastOption = option
-	if option == "Density"  then self:density()
-	elseif option == "Count"    then self:count()
-	elseif option == "Lights"   then self:lights()
-	elseif option == "Particles"then self:particles()
-	elseif option == "Triangles"then self:triangles()
-	end
 	self:sortModels()
+
+	budget:setPhase("Highlighting", 0)
+	self:_paint()
+
+	self.lastSummary = summary
+	self.scanning    = false
+	self._budget     = nil
+
+	return true
 end
 
 return HeatmapService
