@@ -18,74 +18,74 @@ Studio, the two dead menu buttons became the `Texture` and `Overlap` modes, and
 the `Density` / `Lights` / `Particles` formulas were measuring the wrong things
 and now don't.
 
-What that did **not** fix is the strategic gap. Every mode still answers "what
-looks expensive?" using proxies. A developer's actual question is "what should I
-change, and how much will it save?" — and nothing here answers the second half.
-Everything below exists to close that gap.
+v1.7 closed the strategic gap those fixes left open. Until then every mode
+answered "what *looks* expensive?" with a proxy; `Measure` answers "what does
+this actually cost?" with the engine's own counters, and `Draws` answers "how
+many draw calls is this place?" for the whole scene. The half still missing is
+"…and how much will changing it save?" — that's v1.8.
 
 ---
 
-## v1.7 — Real numbers
+## v1.7 — Real numbers ✅ shipped
 
 The theme: replace heuristics with measurements wherever the engine will give us
 one.
 
-### Measure Selection
+### Measure Selection ✅
 
-**The flagship feature. Nothing else on this list matters as much.**
+Reads `SceneDrawcallCount` / `SceneTriangleCount`, makes the selected objects
+stop rendering, reads again, reports the difference. Works on the selection, or
+on the worst offenders of the last scan when nothing is selected. Capped at 50
+targets. Mechanics and the full record of what was verified live in
+`Modules/RenderProbe.luau`.
 
-The engine already knows the true cost of every object — `SceneDrawcallCount`,
-`SceneTriangleCount` and `ShadowsDrawcallCount` are right there in `Stats`. We
-can attribute those numbers to a single object by difference:
+**What the verification in Studio actually found** (edit mode, 1082-part scene):
 
-1. read the counters
-2. make the object stop rendering (`LocalTransparencyModifier = 1` plus
-   `CastShadow = false` — neither is serialised, so the place is never dirtied)
-3. wait a frame
-4. read again; the delta is that object's real draw calls, triangles and shadow
-   cost from the current camera
+- `LocalTransparencyModifier = 1` **does** drop a part from the render batch:
+  58 → 13 draw calls, 33,080 → 26 triangles with everything hidden, and the
+  counters return to exactly their previous values on restore. No fallback to
+  `Transparency` or `Parent = nil` is needed, so the place is never dirtied.
+- With nothing moving the counters are **stable to the unit**, frame after
+  frame. A delta of one draw call is signal, not noise.
+- **This roadmap was wrong about `CastShadow`.** It claimed neither property is
+  serialised; `CastShadow` is, so toggling it would mark the place as modified.
+  The shadow counters were also still drifting (0 → 15 → 2 → 39) several frames
+  after a change. Per-object **shadow cost is therefore not measured** — left
+  out rather than reported as a noisy number that dirties the file to obtain.
+  Anyone revisiting this needs a way to settle the shadow map deterministically
+  first.
+- Per-object deltas are frequently **zero**, for two different reasons: the
+  object is outside the camera frustum, or it shares a batch with others so
+  removing it alone saves nothing. Both are real answers about *this shot*, and
+  the UI says "not drawn from this camera" rather than "0 draw calls".
 
-What this unlocks in one move:
+### Static draw-call report ✅
 
-- **real triangle counts on Toolbox and Marketplace meshes**, sidestepping the
-  `CreateEditableMeshAsync` permission wall that makes `Triangles` fall back to
-  an estimate on most scenes
-- **draw calls per object** — the thread's most-repeated request (NotRapidV,
-  xor25th), which no plugin currently answers
-- **shadow cost per object**, separately from its base cost
+`Draws` groups every renderable by `(geometry, surface, pass)` — mesh URI /
+primitive shape / per-union identity, then `SurfaceAppearance` maps, texture,
+`MaterialVariant` or material, then transparency and shadow pass. The number of
+groups is approximately the draw call count, and the list is the tail: batches
+used once, which pay a full draw call for a single object.
 
-It takes ~2 frames per object, so this is a *"measure the selection"* /
-*"measure the top 50 from the last scan"* action, not a whole-place sweep. The
-workflow becomes: heuristic heatmap to narrow the field, real measurement to
-confirm.
+The summary prints the estimate next to the live `SceneDrawcallCount` so the
+error is visible — with the caveat that they count different things (whole place
+vs. what the camera sees). On the test scene the estimate came out at 58 batches
+against 58 reported draw calls, which is a better agreement than this method
+deserves in general and should not be quoted as its accuracy.
 
-> ⚠️ **Verify before promising anything.** Confirm in Studio that
-> `LocalTransparencyModifier = 1` actually drops the object from the render batch
-> in edit mode. If it doesn't, fall back to `Transparency = 1` (restore after,
-> and don't record a ChangeHistory waypoint) or `Parent = nil`. Do this test
-> first — the whole feature depends on it.
+Known imprecision, stated in the mode and worth keeping stated:
+`UnionOperation.AssetId` is not a readable member, so copies of one union cannot
+be told apart from distinct unions and each is counted as its own batch.
 
-### Static draw-call report
-
-Draw calls are also derivable without measuring, because objects batch by
-`(MeshId, TextureID, SurfaceAppearance, MaterialVariant, Transparency > 0,
-CastShadow)`. Group every renderable by that key: the number of groups is
-approximately the number of draw calls.
-
-The actionable output isn't the total, it's the tail — *"60 assets appear
-exactly once, costing a full draw call each; your 12 most-reused meshes cover
-8,000 instances in 12 draw calls."*
-
-Validate the estimate against the real `SceneDrawcallCount` and **display the
-error rather than hiding it**. An estimate that shows its own accuracy is worth
-more than one that doesn't.
-
-### Texture memory, with actual numbers
+### Texture memory, with actual numbers — still open
 
 `Texture` currently ranks asset counts because the engine exposes no resolution.
 Investigate whether `Stats` memory categories (`GraphicsTexture`) can be diffed
-the same way Measure Selection diffs draw calls. If they can, the mode graduates
-from a ranking to a measurement.
+the way `RenderProbe` now diffs draw calls. The obstacle to expect: texture
+memory is a cache, so it won't drop the frame an object stops rendering the way
+a draw call does, and the diff may need an eviction that plugins can't force. If
+it works, the mode graduates from a ranking to a measurement; if it doesn't,
+record why here and leave the mode honest about counting assets.
 
 ---
 
@@ -117,7 +117,10 @@ One number for the place, plus the top five issues and an estimated saving:
 kind of thing that gets a plugin recommended rather than merely installed.
 
 Only ship this once the numbers behind it are measurements (v1.7), not
-heuristics stacked on heuristics.
+heuristics stacked on heuristics. `Draws` now gives a whole-place draw call
+figure to build a score on; `Measure` gives per-object confirmation. What's still
+missing is the *saving* half — the estimate of what a fix is worth, which is the
+one-click fixes above.
 
 ### Snapshot & diff
 
@@ -181,7 +184,10 @@ live instantaneous readout does not.
 Small, independent, each worth doing whenever there's an opening.
 
 - **Virtualise the results list.** `refreshList` builds one frame per row; a few
-  thousand findings will stall the panel.
+  thousand findings will stall the panel. **More pressing since v1.7:** `Draws`
+  reports one row per one-off batch, and a place assembled from Toolbox models
+  can easily have thousands. Capping the list is not the answer — the highlight
+  cap exists precisely so the list can stay complete — so this is the fix.
 - **Search / filter / group by asset** in the list, and "select every HIGH COST
   item" (`Selection:Set` takes a list).
 - **Camera cost view** — cull to the current camera frustum and report *"78% of
@@ -205,9 +211,20 @@ Small, independent, each worth doing whenever there's an opening.
 
 Carry these caveats forward; do not let them quietly disappear from the UI.
 
+- **`Measure`** reports the cost **from the current camera, at the margin**. Zero
+  means the object is outside the frustum or shares a batch with others — never
+  "free", and the UI must keep saying "not drawn from this camera" instead of
+  "0 draw calls". Marginal costs also don't sum: objects measured one at a time
+  total less than the same objects measured together. Shadow cost is not
+  measured at all (see v1.7 above for why).
+- **`Draws`** is an estimate. Batching depends on renderer decisions no property
+  exposes, and each `UnionOperation` is counted as its own batch because there is
+  no readable shared asset id. Its summary prints the engine's own count beside
+  the estimate; keep it printing it, and keep saying the two cover different
+  scopes.
 - **`Triangles`** cannot measure meshes the user doesn't own. Estimated rows are
   labelled `(est. …)` and ranked separately, because a triangle count and a
-  heuristic score are different units. Measure Selection is the real fix.
+  heuristic score are different units. `Measure` is the way round it, per object.
 - **`Texture`** counts assets, not megabytes. The engine exposes no resolution.
 - **`Overlap`** uses axis-aligned bounding boxes, so the reported percentage is
   an upper bound for rotated parts.
