@@ -17,11 +17,23 @@
 -- inventing a number, so the panel greys them out and says so until you hit
 -- Play. Scene and instance counts are properties of what's loaded and stay
 -- meaningful either way.
+--
+-- `Source = "Place"` rows aren't read from Stats: UIService fills them from
+-- PlaceCounter.
+--
+-- InstanceCount has no budget on purpose. It counts the whole process --
+-- Studio's UI, CoreGui, every installed plugin, the engine's own services --
+-- so it sits in the tens of thousands on an empty baseplate, and colouring it
+-- red told people their place was heavy when nothing in it was theirs. The
+-- place's own share is the PlaceInstances row right below it. That one is left
+-- uncoloured too: an instance count alone doesn't predict frame time, and there
+-- is no honest single number to compare it with.
 return {
 	-- Instance & Physics Counts
 	{ Divider     = true,  Title = "Instance & Physics Counts" },
-	{ Name        = "InstanceCount",          Description = "Number of Instances in memory.",
-	  Good        = 15000,   Warn = 40000 },
+	{ Name        = "InstanceCount",          Description = "All Instances in memory: includes Studio, CoreGui and plugins." },
+	{ Name        = "PlaceInstances",         Description = "Instances in your place's own services.",
+	  Source      = "Place" },
 	{ Name        = "PrimitivesCount",        Description = "Number of physics-simulated objects.",
 	  Good        = 2000,    Warn = 8000 },
 	{ Name        = "MovingPrimitivesCount",  Description = "Count of moving physics objects.",

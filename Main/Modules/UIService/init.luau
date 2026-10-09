@@ -8,7 +8,8 @@ local Selection     = game:GetService("Selection")
 local RunService    = game:GetService("RunService")
 local Stats         = game:GetService("Stats")
 
-local Properties = require(script.Properties)
+local Properties   = require(script.Properties)
+local PlaceCounter = require(script.Parent.PlaceCounter)
 
 -- Same palette as HeatmapService.colors; used when no colors are passed in.
 local DEFAULT_COLORS = {
@@ -38,19 +39,135 @@ function UIService.new(mouse, animModule, main, template, statsTemplate)
 		-- ensureStats. Maps Properties index -> the row's value label.
 		_statRows  = nil,
 		_statsBuilt = false,
+
+		-- backs the `Source = "Place"` rows; started with the Stats panel
+		placeCounter = PlaceCounter.new(),
 	}, UIService)
 
 	-- bind the menu Frame-buttons to their callbacks
+	local buttons = {}
 	for _, button in ipairs(main.Body.Head:GetChildren()) do
 		if button:IsA("Frame") then
 			animModule.button(button, mouse)
 			button.Click.MouseButton1Down:Connect(function()
 				self:fire(button.Name)
 			end)
+			table.insert(buttons, button)
 		end
 	end
 
+	self:_bindModeBar(buttons)
+
 	return self
+end
+
+-- Mode bar layout ------------------------------------------------------------
+
+-- The mode buttons sit in `Body.Head`, a 60px-tall horizontal UIListLayout that
+-- neither wraps nor clips. That fitted the original four modes; with ten, any
+-- panel narrower than ~650px pushed buttons off both edges (the layout is
+-- centred) where they couldn't be clicked. The bar is now laid out in code:
+-- buttons shrink to fit the width, and once they'd go below BUTTON_MIN they
+-- wrap onto extra rows. The results list and stats panel then take whatever
+-- height is left, instead of a fixed 86% of the body.
+--
+-- Each button keeps its place-file Size ({1,0},{1,0} + a 1:1 aspect constraint,
+-- i.e. "square, as tall as my parent") -- Anim's hover tween captured that Size
+-- and tweens relative to it -- so a button's size is set through the height of
+-- the row it's parented to.
+local BUTTON_MAX = 60 -- the place file's original size
+local BUTTON_MIN = 30 -- below this the icons stop being recognisable
+local BUTTON_GAP = 5  -- matches Head.UIListLayout.Padding
+local BODY_GAP   = 6  -- between the mode bar and the list / stats below it
+
+function UIService:_bindModeBar(buttons)
+	local head = self.mainUI.Body.Head
+
+	table.sort(buttons, function(a, b)
+		if a.LayoutOrder ~= b.LayoutOrder then
+			return a.LayoutOrder < b.LayoutOrder
+		end
+		return a.Name < b.Name
+	end)
+
+	local headLayout = head:FindFirstChildOfClass("UIListLayout")
+	if headLayout then
+		headLayout.FillDirection = Enum.FillDirection.Vertical
+		headLayout.Padding       = UDim.new(0, BUTTON_GAP)
+	end
+
+	self._modeButtons = buttons
+	self._modeRows    = {}
+
+	head:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		self:_layoutModeBar()
+	end)
+	self:_layoutModeBar()
+end
+
+function UIService:_layoutModeBar()
+	local body    = self.mainUI.Body
+	local head    = body.Head
+	local buttons = self._modeButtons
+	local width   = head.AbsoluteSize.X
+
+	-- 0 while the widget has never been shown; Head's own height changes below
+	-- fire this signal too, so only a width change does any work
+	if width <= 0 or #buttons == 0 or width == self._modeBarWidth then
+		return
+	end
+	self._modeBarWidth = width
+
+	local count     = #buttons
+	local maxPerRow = math.max(1, math.floor((width + BUTTON_GAP) / (BUTTON_MIN + BUTTON_GAP)))
+	local rowCount  = math.ceil(count / maxPerRow)
+	-- balance the rows (4+3+3, not 4+4+2) so the last one isn't a stub
+	local perRow    = math.ceil(count / rowCount)
+	local size      = math.floor((width - BUTTON_GAP * (perRow - 1)) / perRow)
+	size = math.clamp(size, 1, BUTTON_MAX)
+
+	local rows = self._modeRows
+	for index = 1, math.max(rowCount, #rows) do
+		local row = rows[index]
+		if index > rowCount then
+			if row then
+				row.Parent = nil
+			end
+		else
+			if not row then
+				row = Instance.new("Frame")
+				row.Name                   = "Row"
+				row.BackgroundTransparency = 1
+				row.BorderSizePixel        = 0
+
+				local layout = Instance.new("UIListLayout")
+				layout.FillDirection       = Enum.FillDirection.Horizontal
+				layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+				layout.VerticalAlignment   = Enum.VerticalAlignment.Center
+				layout.SortOrder           = Enum.SortOrder.LayoutOrder
+				layout.Padding             = UDim.new(0, BUTTON_GAP)
+				layout.Parent              = row
+
+				rows[index] = row
+			end
+			row.LayoutOrder = index
+			row.Size        = UDim2.new(1, 0, 0, size)
+			row.Parent      = head
+		end
+	end
+
+	for index, button in ipairs(buttons) do
+		button.Parent = rows[math.ceil(index / perRow)]
+	end
+
+	local headHeight = rowCount * size + (rowCount - 1) * BUTTON_GAP
+	head.Size = UDim2.new(1, 0, 0, headHeight)
+
+	for _, panel in ipairs({ body.List, body.Stats }) do
+		panel.AnchorPoint = Vector2.new(0, 1)
+		panel.Position    = UDim2.new(0, 0, 1, 0)
+		panel.Size        = UDim2.new(1, 0, 1, -(headHeight + BODY_GAP))
+	end
 end
 
 function UIService:onOptionSelected(fn)
@@ -215,6 +332,7 @@ function UIService:ensureStats(mainUI, template)
 	end
 
 	self._statsBuilt = true
+	self.placeCounter:start()
 	self:_applyDescriptions()
 end
 
@@ -244,7 +362,12 @@ function UIService:updateStats(colors)
 	self:_applyDescriptions()
 
 	for _, entry in ipairs(self._statRows) do
-		local value = readStat(entry.data.Name)
+		local value
+		if entry.data.Source == "Place" then
+			value = self.placeCounter:get()
+		else
+			value = readStat(entry.data.Name)
+		end
 
 		if value == nil then
 			entry.label.Text = "n/a"
@@ -259,6 +382,10 @@ function UIService:updateStats(colors)
 			end
 		end
 	end
+end
+
+function UIService:destroy()
+	self.placeCounter:stop()
 end
 
 return UIService

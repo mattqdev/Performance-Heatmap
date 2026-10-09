@@ -2,6 +2,8 @@
 -- Entry point: owns every Studio plugin API call and wires the modules together.
 local plugin = plugin
 
+local RunService = game:GetService("RunService")
+
 -- 1) load the modules (first of all: the version comes from Version.luau)
 local Modules       = script:WaitForChild("Modules", 30)
 local Anim          = require(Modules:WaitForChild("Anim",           10))
@@ -57,7 +59,15 @@ local ui      = UIService.new(plugin:GetMouse(), Anim, mainUI, template, statsTe
 local heatmap = HeatmapSvc.new({ folderName = "PerformanceHeatmapAdornments" })
 
 -- 6) update check (non-blocking, non-fatal)
+-- Edit mode only. Studio loads every plugin again inside each playtest
+-- DataModel, and on the client HttpService refuses outright ("Http requests can
+-- only be executed by game server"), so the old unconditional check printed a
+-- warning on every Play. Once per Studio session is all the check needs.
 task.spawn(function()
+	if not RunService:IsEdit() then
+		return
+	end
+
 	local result = UpdateChecker.check()
 	if result.ok and result.updateAvailable then
 		warn(string.format(
@@ -151,5 +161,6 @@ end)
 -- scan still in flight) when the plugin unloads or reloads.
 plugin.Unloading:Connect(function()
 	statsRunning = false
+	ui:destroy()
 	heatmap:clear()
 end)
